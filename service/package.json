@@ -1,0 +1,36 @@
+{
+  "name": "tavily-proxy",
+  "version": "1.0.0",
+  "description": "Self-hosted Tavily MCP proxy with local API key pool",
+  "main": "dist/src/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "tavily",
+    "mcp",
+    "proxy",
+    "search"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@hono/node-server": "^1.19.11",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "fetch-to-node": "^2.1.0",
+    "hono": "^4.12.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
