@@ -18,20 +18,14 @@
   config,
   lib,
   pkgs,
-  self ? null,
   ...
 }:
 
 let
   cfg = config.services.tavily-proxy;
 
-  # Build the Node.js service from this flake's source
-  # When self is null (module used outside flake), fall back to local path
-  serviceSrc =
-    if self != null then
-      pkgs.callPackage (self + "/nix/package.nix") { }
-    else
-      pkgs.callPackage ./nix/package.nix { };
+  # The tavily-proxy package from the overlay or pkgs
+  tavilyProxyPkg = cfg.package;
 
   # Actual store path (use config value or default to home directory)
   actualStorePath =
@@ -46,7 +40,7 @@ let
   tavilyProxy = pkgs.writeShellScriptBin "tavily-proxy" (
     ''
       set -e
-      export NODE_PATH="${serviceSrc.passthru.serviceSrc}/node_modules"
+      export NODE_PATH="${tavilyProxyPkg.passthru.serviceSrc}/node_modules"
       export TAVILY_PORT="${toString cfg.port}"
       export TAVILY_STORE_PATH="${actualStorePath}"
     ''
@@ -54,7 +48,7 @@ let
       export TAVILY_AUTH_KEY="${cfg.authKey}"
     ''
     + ''
-      exec ${pkgs.nodejs_20}/bin/node "${serviceSrc.passthru.serviceSrc}/dist/src/index.js" "$@"
+      exec ${pkgs.nodejs_20}/bin/node "${tavilyProxyPkg.passthru.serviceSrc}/dist/src/index.js" "$@"
     ''
   );
 
@@ -63,11 +57,11 @@ let
     set -e
 
     base_url="http://127.0.0.1:${toString cfg.port}"
-    key_store_path="${lib.escapeShellArg (cfg.keyStorePath or "")}"
+    key_store_path="${lib.escapeShellArg (toString cfg.keyStorePath)}"
 
     # Read authKey from the decrypted key store JSON (preferred) or env var
     auth_key=""
-    if [ -n "$key_store_path" ] && [ -f "$key_store_path" ]; then
+    if [ -n "$key_store_path" ] && [ "$key_store_path" != "null" ] && [ -f "$key_store_path" ]; then
       auth_key="$(${pkgs.jq}/bin/jq -r '.authKey // empty' "$key_store_path")"
     fi
     auth_key="''${auth_key:-''${TAVILY_AUTH_KEY:-}}"
@@ -158,6 +152,13 @@ in
 {
   options.services.tavily-proxy = {
     enable = lib.mkEnableOption "Tavily MCP proxy with API key pool";
+
+    package = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.tavily-proxy or (throw "tavily-proxy package not found. Add the overlay to nixpkgs.overlays.");
+      defaultText = "pkgs.tavily-proxy";
+      description = "The tavily-proxy package to use. Provided by the tavily-proxy overlay.";
+    };
 
     port = lib.mkOption {
       type = lib.types.port;
