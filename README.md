@@ -1,157 +1,107 @@
 # Tavily Proxy
 
-Self-hosted Tavily MCP proxy with local API key pool.
+Self-hosted proxy that sits between your clients and the [Tavily API](https://tavily.com/), providing a shared API key pool with automatic rotation, rate-limit-aware key selection, and dual-protocol MCP access.
 
-Replaces per-client Tavily API keys with a shared key pool that automatically rotates keys based on remaining credits, rate limits, and error states.
+## Why
 
-## Features
-
-- **Multi-key pool**: Manage multiple Tavily API keys, automatically pick the one with the most remaining credits
-- **MCP server**: Exposes both Streamable HTTP (`/mcp`) and legacy SSE (`/sse`) transports
-- **REST API**: Tavily-compatible REST endpoints (`/search`, `/extract`, `/crawl`, `/map`, `/research`)
-- **Key management**: CLI and REST API for adding/removing/listing keys
-- **Rate limiting**: Respects per-key QPS limits with automatic wait
-- **Error handling**: Temporarily disables keys after 3 consecutive errors, re-enables after cooldown
+- **Multi-key pool** — register multiple Tavily API keys; the proxy automatically picks the one with the most remaining credits per request
+- **Transparent rotation** — 401/403 keys are invalidated on the spot; 3 consecutive errors trigger a 5-minute cooldown; keys recover automatically
+- **Rate-limit aware** — respects per-key QPS limits (default 1 QPS) with in-memory mutex and automatic wait (capped at 10 s)
+- **Dual MCP transports** — Streamable HTTP (`/mcp`, protocol `2025-11-25`) for modern clients and legacy SSE (`/sse`, protocol `2024-11-05`) for older ones
+- **Tavily-compatible REST API** — drop-in replacement for `https://api.tavily.com/*` (search, extract, crawl, map, research)
+- **Credit tracking** — syncs remaining credits from Tavily's `/usage` endpoint after every successful request
 
 ## Quick Start
 
 ```bash
-# Set required environment variables
-export TAVILY_AUTH_KEY="your-management-key"
-export TAVILY_STORE_PATH="/path/to/key-store.json"
-
-# Optional: load initial keys from a JSON file
-export TAVILY_KEY_STORE_PATH="/path/to/keys.json"
-
-# Start the proxy
-npm start
-```
-
-The key store JSON format (`TAVILY_KEY_STORE_PATH`):
-
-```json
+# 1. Create a key store file
+cat > keys.json << 'EOF'
 {
-  "authKey": "your-management-key",
+  "authKey": "your-secret-management-key",
   "keys": [
     { "key": "tvly-xxxxxxxxxxxx", "credit": 1000 },
     { "key": "tvly-yyyyyyyyyyyy", "credit": 1000 }
   ]
 }
+EOF
+
+# 2. Start the proxy
+npx tavily-proxy                           # if installed via npm
+# — or —
+nix run github:StarsInDmajor/tavily-proxy  # if using Nix
+
+# With environment variables
+TAVILY_KEY_STORE_PATH=./keys.json TAVILY_PORT=9100 node dist/src/index.js
 ```
 
-## Environment Variables
+The proxy listens on `http://localhost:9100` by default.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TAVILY_PORT` | `9100` | Server listen port |
-| `TAVILY_STORE_PATH` | `~/.local/state/tavily/key-store.json` | Runtime key pool state file |
-| `TAVILY_KEY_STORE_PATH` | *(none)* | Initial key + authKey JSON (loaded once at startup) |
-| `TAVILY_AUTH_KEY` | *(none)* | Management auth key (x-api-key header). Falls back to `authKey` in key store |
-| `TAVILY_EXTERNAL_PATH` | *(none)* | URL path prefix for reverse proxy setups (e.g. `/tavily`) |
+## Usage
 
-## MCP Integration
-
-### OpenCode / Streamable HTTP clients
+### MCP (OpenCode, Claude Code, etc.)
 
 ```json
 {
   "mcpServers": {
     "tavily-proxy": {
       "url": "http://localhost:9100/mcp",
-      "headers": { "x-api-key": "your-management-key" }
+      "headers": { "x-api-key": "your-secret-management-key" }
     }
   }
 }
 ```
 
-### Claude Code / Legacy SSE clients
+Five MCP tools are exposed: `tavily-search`, `tavily-extract`, `tavily-crawl`, `tavily-map`, `tavily-research`. Parameters match the [official Tavily API](https://docs.tavily.com/documentation/api-reference) one-to-one.
 
-```json
-{
-  "mcpServers": {
-    "tavily-proxy": {
-      "url": "http://localhost:9100/sse",
-      "headers": { "x-api-key": "your-management-key" }
-    }
-  }
-}
-```
+### REST API
 
-## REST API
-
-All REST endpoints accept `api_key` in the request body (or `Authorization: Bearer` header) instead of `x-api-key`:
+Drop-in replacement — send requests to `localhost:9100` instead of `api.tavily.com`:
 
 ```bash
 # Search
 curl -X POST http://localhost:9100/search \
   -H "Content-Type: application/json" \
-  -d '{"api_key": "your-management-key", "query": "test"}'
+  -d '{"api_key": "your-secret-management-key", "query": "test"}'
 
 # Extract
 curl -X POST http://localhost:9100/extract \
   -H "Content-Type: application/json" \
-  -d '{"api_key": "your-management-key", "urls": ["https://example.com"]}'
+  -d '{"api_key": "your-secret-management-key", "urls": ["https://example.com"]}'
 ```
 
-## Key Management CLI
+### Key Management CLI
 
 ```bash
-tavily-cli status          # Show service status and keys
-tavily-cli add tvly-xxx    # Add a key
+tavily-cli status          # Service status + key list
+tavily-cli add tvly-xxx    # Add a key (syncs credits from Tavily)
 tavily-cli remove tvly-xxx # Remove a key
 tavily-cli list            # List keys with remaining credits
 tavily-cli health          # Health check
 ```
 
-## Development
+## Documentation
 
-```bash
-# Install dependencies
-npm install
+| Document | Contents |
+|----------|----------|
+| [Architecture](docs/architecture.md) | Key pool algorithm, auth model, MCP transports, research async flow |
+| [API Reference](docs/api.md) | REST endpoints, MCP tools, key management API, error responses |
+| [Deployment](docs/deployment.md) | Home Manager module, environment variables, reverse proxy setup |
+| [Development](docs/development.md) | Project structure, testing, building, Nix integration |
 
-# Run tests
-npm test
+## Credit Costs (upstream Tavily)
 
-# Development mode (hot reload)
-npm run dev
+| Operation | Cost |
+|-----------|------|
+| Search `basic` | 1 credit |
+| Search `advanced` | 2 credits |
+| Extract `basic` | 1 credit / 5 URLs |
+| Extract `advanced` | 2 credits / 5 URLs |
+| Crawl | 2 credits / call |
+| Map | 1 credit / 10 pages (2 with `instructions`) |
+| Research `mini` | 4–20 credits |
+| Research `pro` | 20–250 credits |
 
-# Type checking
-npm run typecheck
-
-# Build
-npm run build
-```
-
-## Nix
-
-```bash
-# Build the package
-nix build
-
-# Run directly
-nix run
-
-# Enter dev shell
-nix develop
-```
-
-### Home Manager Module
-
-```nix
-# In your flake.nix:
-inputs.tavily-proxy.url = "github:pulcerto/tavily-proxy";
-
-# In your Home Manager config:
-imports = [ inputs.tavily-proxy.homeManagerModules.default ];
-
-services.tavily-proxy = {
-  enable = true;
-  port = 9100;
-  keyStorePath = "/path/to/decrypted/keys.json";
-  externalPath = "/tavily";  # if behind reverse proxy
-  afterServices = [ "agenix.service" ];  # if using agenix
-};
-```
+The proxy tracks credits per key via Tavily's `/usage` endpoint and selects the key with the highest remaining balance.
 
 ## License
 
