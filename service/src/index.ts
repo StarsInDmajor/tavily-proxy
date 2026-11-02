@@ -72,6 +72,7 @@ export function createApp(kv: LocalKVStore, env: Env) {
       triedKeys.add(apiKey);
       console.log(`[REST] ${toolName} using key: ${apiKey.substring(0, 13)}...`);
       try {
+        await kv.recordRequestStart(apiKey);
         const result = await fn(apiKey);
         await kv.updateLastRequestTime(apiKey);
         await kv.recordSuccess(apiKey).catch(console.error);
@@ -113,6 +114,7 @@ export function createApp(kv: LocalKVStore, env: Env) {
         console.log(`[MCP] ${toolName} using key: ${apiKey.substring(0, 13)}...`);
       }
       try {
+        await kv.recordRequestStart(apiKey);
         const result = await fn(apiKey);
         await kv.updateLastRequestTime(apiKey);
         await kv.recordSuccess(apiKey).catch(console.error);
@@ -218,9 +220,7 @@ export function createApp(kv: LocalKVStore, env: Env) {
         }
         return withKeyFallback("tavily-search",
           (apiKey) => tavilyClient.search(apiKey, params),
-          async (apiKey) => {
-            await syncKeyWithApi(kv, apiKey).catch(console.error);
-          }
+          async () => {}
         );
       }
     );
@@ -262,9 +262,7 @@ export function createApp(kv: LocalKVStore, env: Env) {
       async (params) => {
         return withKeyFallback("tavily-extract",
           (apiKey) => tavilyClient.extract(apiKey, params),
-          async (apiKey) => {
-            await syncKeyWithApi(kv, apiKey).catch(console.error);
-          }
+          async () => {}
         );
       }
     );
@@ -340,9 +338,7 @@ export function createApp(kv: LocalKVStore, env: Env) {
       async (params) => {
         return withKeyFallback("tavily-crawl",
           (apiKey) => tavilyClient.crawl(apiKey, params),
-          async (apiKey) => {
-            await syncKeyWithApi(kv, apiKey).catch(console.error);
-          }
+          async () => {}
         );
       }
     );
@@ -396,9 +392,7 @@ export function createApp(kv: LocalKVStore, env: Env) {
       async (params) => {
         return withKeyFallback("tavily-map",
           (apiKey) => tavilyClient.map(apiKey, params),
-          async (apiKey) => {
-            await syncKeyWithApi(kv, apiKey).catch(console.error);
-          }
+          async () => {}
         );
       }
     );
@@ -460,6 +454,7 @@ export function createApp(kv: LocalKVStore, env: Env) {
           console.log(`[MCP] tavily-research using key: ${apiKey.substring(0, 13)}...`);
 
           try {
+            await kv.recordRequestStart(apiKey);
             const init = await tavilyClient.research(apiKey, researchParams);
             const requestId = init.request_id;
             console.log(`[MCP] tavily-research job started: ${requestId}`);
@@ -483,7 +478,6 @@ export function createApp(kv: LocalKVStore, env: Env) {
             }
 
             await kv.updateLastRequestTime(apiKey);
-            await syncKeyWithApi(kv, apiKey).catch(console.error);
 
             return {
               content: [{ type: "text" as const, text: JSON.stringify(poll, null, 2) }],
@@ -520,9 +514,7 @@ export function createApp(kv: LocalKVStore, env: Env) {
     try {
       const result = await withKeyFallbackRaw("search",
         (apiKey) => tavilyClient.search(apiKey, params),
-        async (apiKey) => {
-          await syncKeyWithApi(kv, apiKey).catch(console.error);
-        }
+        async () => {}
       );
       return c.json(result);
     } catch (err: unknown) {
@@ -540,9 +532,7 @@ export function createApp(kv: LocalKVStore, env: Env) {
     try {
       const result = await withKeyFallbackRaw("extract",
         (apiKey) => tavilyClient.extract(apiKey, params),
-        async (apiKey) => {
-          await syncKeyWithApi(kv, apiKey).catch(console.error);
-        }
+        async () => {}
       );
       return c.json(result);
     } catch (err: unknown) {
@@ -560,9 +550,7 @@ export function createApp(kv: LocalKVStore, env: Env) {
     try {
       const result = await withKeyFallbackRaw("crawl",
         (apiKey) => tavilyClient.crawl(apiKey, params),
-        async (apiKey) => {
-          await syncKeyWithApi(kv, apiKey).catch(console.error);
-        }
+        async () => {}
       );
       return c.json(result);
     } catch (err: unknown) {
@@ -580,9 +568,7 @@ export function createApp(kv: LocalKVStore, env: Env) {
     try {
       const result = await withKeyFallbackRaw("map",
         (apiKey) => tavilyClient.map(apiKey, params),
-        async (apiKey) => {
-          await syncKeyWithApi(kv, apiKey).catch(console.error);
-        }
+        async () => {}
       );
       return c.json(result);
     } catch (err: unknown) {
@@ -604,10 +590,7 @@ export function createApp(kv: LocalKVStore, env: Env) {
           researchKeyMap.set(init.request_id, apiKey);
           return init;
         },
-        async (apiKey) => {
-          // Cost is dynamic — sync after completion to update credits
-          await syncKeyWithApi(kv, apiKey).catch(console.error);
-        }
+        async () => {}
       ) as tavilyClient.ResearchInitResponse;
       return c.json(result);
     } catch (err: unknown) {
@@ -645,7 +628,6 @@ export function createApp(kv: LocalKVStore, env: Env) {
       }
       if ((result.status === "completed" || result.status === "failed") && requestApiKey) {
         researchKeyMap.delete(requestId);
-        await syncKeyWithApi(kv, requestApiKey).catch(console.error);
       }
       return c.json(result);
     } catch (err: unknown) {
@@ -765,6 +747,8 @@ export function createApp(kv: LocalKVStore, env: Env) {
         return c.json({ error: "Missing 'apiKey' in request body" }, 400);
       }
       const remaining = await syncKeyWithApi(kv, body.apiKey);
+      // New keys must hit disk immediately — don't wait for the periodic flush.
+      await kv.flush();
       return c.json({ success: true, key: { apiKey: body.apiKey, remainingCredit: remaining } });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -890,7 +874,7 @@ async function loadInitialKeys(kv: LocalKVStore, keyStorePath: string | null) {
     for (const keyEntry of data.keys as Record<string, unknown>[]) {
       const apiKey = (keyEntry.key as string | undefined) || (keyEntry.apiKey as string | undefined);
       if (apiKey) {
-        const credit = (keyEntry.credit as number | undefined) || 1000;
+        const credit = (keyEntry.credit as number | undefined) ?? 1000;
         await kv.put(apiKey, String(credit));
         console.log(`[startup]   - Loaded key: ${apiKey.substring(0, 13)}... (credit: ${credit})`);
       }
@@ -924,14 +908,63 @@ async function main() {
   console.log(`Starting tavily-proxy standalone on port ${port}`);
   console.log(`Store path: ${storePath}`);
 
-  const kv = createLocalKV(storePath);
+  const kv = createLocalKV(storePath, {
+    // Upstream per-key rate budget (Tavily documents 100 requests/minute per key).
+    rpmLimit: Number(process.env.TAVILY_KEY_RPM) || 100,
+  });
   await kv.initialize();
 
   await loadInitialKeys(kv, keyStorePath);
 
+  // Periodic credit sync — replaces per-request /usage calls. Per-request
+  // syncs hit Tavily's aggressive /usage rate limit (429) under even moderate
+  // volume; the failures were silently swallowed, freezing displayed credits
+  // at the startup snapshot. One pass per interval, keys sequential with a
+  // small gap to stay comfortably under the rate limit.
+  const SYNC_INTERVAL_MS = Number(process.env.TAVILY_SYNC_INTERVAL_MS) || 5 * 60_000;
+  const periodicCreditSync = async () => {
+    let keys: KeyInfo[];
+    try {
+      keys = await kv.getAllKeys();
+    } catch {
+      return;
+    }
+    for (const k of keys) {
+      if (!k.enabled) continue;
+      try {
+        const remaining = await syncKeyWithApi(kv, k.apiKey);
+        console.log(`[sync] ${k.apiKey.substring(0, 13)}... remaining=${remaining}`);
+      } catch (err: unknown) {
+        console.error(`[sync] ${k.apiKey.substring(0, 13)}... sync failed:`, err instanceof Error ? err.message : err);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+  };
+  // First sync shortly after boot so a restart doesn't sit on stale credits;
+  // unref'd so timers never keep the process alive.
+  const initialSyncTimer = setTimeout(() => {
+    periodicCreditSync().catch(console.error);
+    setInterval(() => periodicCreditSync().catch(console.error), SYNC_INTERVAL_MS).unref();
+  }, 15_000);
+  initialSyncTimer.unref();
+
   const { app } = createApp(kv, { AUTH_KEY: authKey, PORT: port, STORE_PATH: storePath });
 
   const { serve } = await import("@hono/node-server");
+
+  // Flush pending key-pool state to disk on graceful shutdown (launchd sends
+  // SIGTERM on stop/restart; without this the last <30s of updates would be lost).
+  const shutdown = (signal: string) => {
+    console.log(`[shutdown] ${signal} received, flushing key-pool state...`);
+    kv.close()
+      .then(() => process.exit(0))
+      .catch((err) => {
+        console.error(`[shutdown] flush failed:`, err);
+        process.exit(1);
+      });
+  };
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+  process.once("SIGINT", () => shutdown("SIGINT"));
 
   serve({
     fetch: app.fetch,

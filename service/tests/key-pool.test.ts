@@ -14,6 +14,7 @@ describe('LocalKVStore', () => {
   });
 
   afterEach(async () => {
+    await store.close().catch(() => {});
     await fs.unlink(testStorePath).catch(() => {});
   });
 
@@ -159,6 +160,7 @@ describe('LocalKVStore', () => {
 
       await store.put('tvly-enabled', '2000');
       await store.put('tvly-disabled', '5000');
+      await store.flush();
 
       const data = await fs.readFile(testStorePath, 'utf-8');
       const parsed = JSON.parse(data);
@@ -177,7 +179,8 @@ describe('LocalKVStore', () => {
       
       await store.put('tvly-persist', '1234');
       await store.put('tvly-persist2', '5678');
-      
+      await store.flush();
+
       const newStore = new LocalKVStore(testStorePath);
       await newStore.initialize();
       
@@ -191,13 +194,42 @@ describe('LocalKVStore', () => {
       await store.initialize();
       
       await store.put('tvly-test', '1000');
-      
+      await store.flush();
+
       const content = await fs.readFile(testStorePath, 'utf-8');
       const data = JSON.parse(content);
-      
+
       assert.ok(data.version, 'Should have version');
       assert.ok(data.lastSync, 'Should have lastSync');
       assert.ok(data.keys['tvly-test'], 'Should have key data');
+    });
+
+    it('should defer persistence until flush (debounced saves)', async () => {
+      await store.initialize();
+
+      await store.put('tvly-defer', '777');
+
+      // Writes are buffered in memory — disk still shows the pre-put state.
+      const before = JSON.parse(await fs.readFile(testStorePath, 'utf-8'));
+      assert.strictEqual(before.keys['tvly-defer'], undefined);
+
+      await store.flush();
+
+      const after = JSON.parse(await fs.readFile(testStorePath, 'utf-8'));
+      assert.strictEqual(after.keys['tvly-defer'].credit, 777);
+
+      // Second flush with no new mutations is a no-op (dirty flag cleared).
+      await store.flush();
+    });
+
+    it('should catch up deferred writes on close()', async () => {
+      await store.initialize();
+      await store.put('tvly-onclose', '42');
+
+      await store.close();
+
+      const data = JSON.parse(await fs.readFile(testStorePath, 'utf-8'));
+      assert.strictEqual(data.keys['tvly-onclose'].credit, 42);
     });
   });
 
@@ -214,6 +246,7 @@ describe('LocalKVStore', () => {
       await store.put('tvly-err', '1000');
 
       await store.recordError('tvly-err');
+      await store.flush();
 
       const content = await fs.readFile(testStorePath, 'utf-8');
       const data = JSON.parse(content);
@@ -228,6 +261,7 @@ describe('LocalKVStore', () => {
       await store.recordError('tvly-err');
       await store.recordError('tvly-err');
       await store.recordError('tvly-err');
+      await store.flush();
 
       const content = await fs.readFile(testStorePath, 'utf-8');
       const data = JSON.parse(content);
@@ -248,6 +282,7 @@ describe('LocalKVStore', () => {
 
       await store.recordError('tvly-err');
       await store.recordError('tvly-err');
+      await store.flush();
 
       const content = await fs.readFile(testStorePath, 'utf-8');
       const data = JSON.parse(content);
@@ -275,6 +310,7 @@ describe('LocalKVStore', () => {
       await store.recordError('tvly-err');
       await store.recordError('tvly-err');
       await store.recordError('tvly-err');
+      await store.flush();
 
       // Verify disabled
       let content = await fs.readFile(testStorePath, 'utf-8');
@@ -284,6 +320,7 @@ describe('LocalKVStore', () => {
 
       // Record success — should clear everything
       await store.recordSuccess('tvly-err');
+      await store.flush();
 
       content = await fs.readFile(testStorePath, 'utf-8');
       data = JSON.parse(content);
@@ -308,6 +345,7 @@ describe('LocalKVStore', () => {
 
       await store.put('tvly-good', '500');
       await store.put('tvly-temp-disabled', '5000');
+      await store.flush();
 
       // Temporarily disable the high-credit key
       const content = await fs.readFile(testStorePath, 'utf-8');
@@ -327,6 +365,7 @@ describe('LocalKVStore', () => {
       await store.initialize();
 
       await store.put('tvly-expired', '5000');
+      await store.flush();
 
       // Set disabledUntil in the past (expired)
       const content = await fs.readFile(testStorePath, 'utf-8');
@@ -346,6 +385,7 @@ describe('LocalKVStore', () => {
 
       await store.put('tvly-a', '1000');
       await store.put('tvly-b', '2000');
+      await store.flush();
 
       // Temporarily disable both
       const content = await fs.readFile(testStorePath, 'utf-8');
@@ -402,6 +442,79 @@ describe('LocalKVStore', () => {
 
       assert.strictEqual(results.every(r => r !== null), true);
       assert.strictEqual(uniqueKeys.size, 12, 'All 12 concurrent picks should return unique keys');
+    });
+  });
+
+  describe('RPM rolling-window limit', () => {
+    it('should refuse a key once its rpm budget is spent (window exceeds wait timeout)', async () => {
+      const store2 = new LocalKVStore(testStorePath, { rpmLimit: 3 });
+      await store2.initialize();
+      await store2.put('tvly-rpm', '5000');
+
+      await store2.recordRequestStart('tvly-rpm');
+      await store2.recordRequestStart('tvly-rpm');
+      await store2.recordRequestStart('tvly-rpm');
+
+      // Budget spent: oldest window entry is ~60 s from aging out, beyond the
+      // 10 s wait cap — pickBestKey must reject rather than pick.
+      await assert.rejects(
+        () => store2.pickBestKey(),
+        /rate-limited/
+      );
+      await store2.close();
+    });
+
+    it('should preserve requestTimes and error state when put() refreshes credit', async () => {
+      await store.initialize();
+      await store.put('tvly-keep', '800');
+      await store.recordRequestStart('tvly-keep');
+      await store.recordError('tvly-keep');
+
+      await store.put('tvly-keep', '700');
+      await store.flush();
+
+      const data = JSON.parse(await fs.readFile(testStorePath, 'utf-8'));
+      const k = data.keys['tvly-keep'];
+      assert.strictEqual(k.credit, 700);
+      assert.strictEqual(k.consecutiveErrors, 1, 'error state preserved');
+      assert.strictEqual(k.requestTimes?.length, 1, 'rpm window preserved');
+    });
+
+    it('should free the key again once requests age out of the window', async () => {
+      const store2 = new LocalKVStore(testStorePath, { rpmLimit: 2 });
+      await store2.initialize();
+      await store2.put('tvly-rpm2', '5000');
+
+      await store2.recordRequestStart('tvly-rpm2');
+      await store2.recordRequestStart('tvly-rpm2');
+      await store2.flush();
+
+      // Backdate the window entries outside the rolling 60 s window.
+      const data = JSON.parse(await fs.readFile(testStorePath, 'utf-8'));
+      data.keys['tvly-rpm2'].requestTimes = data.keys['tvly-rpm2'].requestTimes.map(
+        () => Date.now() - 61_000
+      );
+      await fs.writeFile(testStorePath, JSON.stringify(data), 'utf-8');
+      await store2.initialize();
+
+      const pick = await store2.pickBestKey();
+      assert.strictEqual(pick?.apiKey, 'tvly-rpm2');
+      await store2.close();
+    });
+
+    it('should count one window entry per actual request, not per pick', async () => {
+      const store2 = new LocalKVStore(testStorePath, { rpmLimit: 100 });
+      await store2.initialize();
+      await store2.put('tvly-once', '5000');
+
+      // Selecting a key (soft-lock) must NOT consume rpm budget — only real calls do.
+      await store2.pickBestKey();
+      await store2.recordRequestStart('tvly-once');
+      await store2.flush();
+
+      const data = JSON.parse(await fs.readFile(testStorePath, 'utf-8'));
+      assert.strictEqual(data.keys['tvly-once'].requestTimes?.length, 1);
+      await store2.close();
     });
   });
 });
