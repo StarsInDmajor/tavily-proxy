@@ -111,6 +111,21 @@ describe('HTTP Integration Tests', () => {
         );
       }
 
+      // Mock /research endpoint (POST starts a job, GET polls it)
+      if (url.includes('/research')) {
+        const isPoll = /\/research\/[^/]+$/.test(url) && (init?.method ?? 'GET') === 'GET';
+        if (isPoll) {
+          return new Response(
+            JSON.stringify(responses['/research/poll'] ?? { status: 'completed', request_id: 'mock-req', content: 'mock report' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response(
+          JSON.stringify(responses['/research'] ?? { request_id: 'mock-req', status: 'pending' }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+
       // Default: 404
       return new Response(JSON.stringify({ error: 'Not mocked' }), { status: 404 });
     };
@@ -165,6 +180,42 @@ describe('HTTP Integration Tests', () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ api_key: 'wrong-key', query: 'test' }),
+      });
+      assert.strictEqual(res.status, 401);
+    });
+
+    // Regression: GET /research/:id was excluded from REST_PATHS and fell through
+    // to the x-api-key-only global middleware, so SDK clients that authenticate
+    // with Bearer (e.g. `tvly research`) could start a job but never poll it.
+    it('GET /research/:id accepts Authorization: Bearer', async () => {
+      const res = await fetch(app, '/research/mock-req', {
+        headers: { Authorization: `Bearer ${AUTH_KEY}` },
+      });
+      assert.strictEqual(res.status, 200);
+      const body = await res.json() as Record<string, unknown>;
+      assert.strictEqual(body.status, 'completed');
+    });
+
+    it('GET /research/:id accepts api_key query param', async () => {
+      const res = await fetch(app, `/research/mock-req?api_key=${AUTH_KEY}`);
+      assert.strictEqual(res.status, 200);
+    });
+
+    it('GET /research/:id accepts x-api-key header', async () => {
+      const res = await fetch(app, '/research/mock-req', {
+        headers: { 'x-api-key': AUTH_KEY },
+      });
+      assert.strictEqual(res.status, 200);
+    });
+
+    it('GET /research/:id rejects missing credentials', async () => {
+      const res = await fetch(app, '/research/mock-req');
+      assert.strictEqual(res.status, 401);
+    });
+
+    it('GET /research/:id rejects wrong credentials', async () => {
+      const res = await fetch(app, '/research/mock-req', {
+        headers: { Authorization: 'Bearer wrong-key' },
       });
       assert.strictEqual(res.status, 401);
     });

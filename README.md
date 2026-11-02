@@ -69,6 +69,34 @@ curl -X POST http://localhost:9100/extract \
   -d '{"api_key": "your-secret-management-key", "urls": ["https://example.com"]}'
 ```
 
+### Using the official `tvly` CLI
+
+The [Tavily CLI](https://github.com/tavily-ai/tavily-cli) can be pointed at this proxy instead of
+`api.tavily.com`, which gives you the proxy's key rotation for free. This requires **tavily-cli ≥ 0.1.8**
+(older versions read `~/.config/tavily/config.yaml` and have no base-URL option):
+
+```bash
+uv tool install tavily-cli==0.1.8
+
+# ~/.tavily/config.json
+cat > ~/.tavily/config.json << 'EOF'
+{
+  "api_key": "<your authKey>",
+  "api_base_url": "http://localhost:9100"
+}
+EOF
+chmod 600 ~/.tavily/config.json
+
+tvly auth                      # → Authenticated via config file
+tvly search "..." --json
+tvly research "..." --model mini
+```
+
+- Use the **management `authKey`** (from the key-store JSON), not a pool `tvly-*` key — REST routes
+  validate the credential against `TAVILY_AUTH_KEY`.
+- `api_base_url` is the whole point; without it the CLI talks to `api.tavily.com` directly and needs a
+  real pool key. The env var `TAVILY_API_BASE_URL` overrides the config file.
+
 ### Key Management CLI
 
 ```bash
