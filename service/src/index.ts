@@ -34,7 +34,7 @@ export function createApp(kv: LocalKVStore, env: Env) {
     if (c.req.path === "/" && c.req.method === "GET") {
       return next();
     }
-    if (REST_PATHS.has(c.req.path)) {
+    if (REST_PATHS.has(c.req.path) || c.req.path.startsWith("/research/")) {
       return next();
     }
     if (c.req.path === "/.well-known/mcp" && c.req.method === "GET") {
@@ -617,6 +617,19 @@ export function createApp(kv: LocalKVStore, env: Env) {
 
   app.get("/research/:requestId", async (c) => {
     const requestId = c.req.param("requestId");
+    // GET has no JSON body, so accept the same three credential forms the POST
+    // routes do: api_key query param, Authorization: Bearer, or x-api-key.
+    // (Previously this route was excluded from REST_PATHS and fell through to
+    // the x-api-key-only global middleware, so SDK clients that authenticate
+    // with Bearer — e.g. `tvly research` — could not poll their own job.)
+    const provided = getRestAuthKey(
+      { api_key: c.req.query("api_key") },
+      c.req.header("authorization"),
+      c.req.header("x-api-key"),
+    );
+    if (!provided || !safeEqual(provided, env.AUTH_KEY)) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
     const requestApiKey = researchKeyMap.get(requestId);
     try {
       let result: tavilyClient.ResearchPollResponse;

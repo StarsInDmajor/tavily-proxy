@@ -139,7 +139,7 @@ Poll a research job's status.
 |-----------|----------|-------------|
 | `requestId` | URL path | The request ID from the POST /research response |
 
-**Auth**: no auth required (the proxy uses the stored pool key, or falls back to the best available key).
+**Auth**: required — `api_key` query param, `Authorization: Bearer` header, or `x-api-key` header (same credential forms as the POST routes, since a GET has no JSON body to carry `api_key`).
 
 **Response**:
 
